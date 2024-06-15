@@ -1,0 +1,613 @@
+---
+title: "Spike Clustering with Ghost Fungi Data"
+author: "Daniel Olds"
+format: html
+editor: visual
+---
+
+##### Note:
+
+This file is too big to render
+
+```{r}
+#| results: hide
+# Load Packages
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyr)
+library(reshape2)
+library(signal)
+library(TSstudio)
+library(waveslim)
+library(cluster)
+library(factoextra)
+
+file_path = "/home/danielolds/code/CS_670/cs670_fungal_project/data.txt" 
+```
+
+## Introduction
+
+The primary motivation of this project is to become familiar with some of the characteristics of the mushroom's mycelium network. Therefore, some initial background about mushroom biology is given here to provide context for this project The mushroom species under consideration is called Ghost Fungus. The Ghost Fungus stands out due to its bioluminescence, such that it glows green in the dark. The mycelium network of Ghost Fungus is the focus of this analysis, and the source of the data. Mycelium is defined as the main body of the fungus, a network of thread-like structures called hyphae that are responsible for nutrient transportation. This network may be imagined of as the root system of the mushroom's fruiting body, which is the visible component of the mushroom. However, mycelium is much more complex than the root system of plants, and possesses complex characteristics that create the potential for computational research.
+
+# Data
+
+Ghost Fungus exhibit oscillations of extra-cellular electrical potential that has been recorded with differential electrodes inserted directly into a substrate colonized by Ghost Fungus Mycelium. The following dataset utilized in this analysis has been obtained from this electrical activity using pairs of sub-dermal needle electrodes. Some of details of this collection note the noise-free and high quality resolution through the use of twisted cables and a ADC-24 high-resolution data logger with a 24-bit A/D converter, with galvanic isolation and software selectable sample rates. Each pair of electrodes has been reported as a potential difference between the electrodes, and one sample per second is captured. Each sample from each of the 7 channels is the average of 600 values that are logged within each second using this equipment. This recording process occurred over a five day period, resulting in approximately 3.5 million electrical samples.
+
+# Questions
+
+1.  What are the characteristics of the spiking activity in mushroom networks?
+2.  Do mushrooms communicate complex information using their network system?
+3.  Can a theory of language be ascribed to mushroom electrical activity?
+
+These questions are inspired by existing work from Andrew Adamatzky in his book Fungal Machines. Professor Adamatzky has pioneered nearly all the existing work on fungal computing and demonstrated the potential for research in this area. The culmination of this book describes some preliminary results that demonstrate work-like structure and complex communication in the electrical activity of mushroom networks. Spiking activity is the basis for all subsequent analysis of electrical signals. Spikes are fundamental in signal processing because they allow for the identification of underlying processes that distinguish meaningful signals from the noise. In mushrooms, they may be generally thought of as the rapid change in electrical potential that occurs over a very short period. Spiking activity, in the context of this project, is associated with important biological events or responses. The scope of this work does not directly address the questions given above, because they are too complex to be answered in a limited time frame and without direct experimentation on the mushroom. However, the nature of this project is to identify spikes, extract their waveform and implement clustering to group the characteristics of these spikes. This is a process called spike sorting, and it is used to reveal insights into a complex communication system.
+
+## Data Preprocessing:
+
+The data is loaded from a text file and transformed into a dataframe with a time component. This data is treated as time series, where the x axis is time and the electrical values of given along the y-axis. Furthermore, there are 7 channels that each capture a range of values, and these channels are decomposed into separate objects to be analyzed individually.
+
+```{r}
+#| results: hide
+# Function: Load Data and Perform basic Preprocessing
+read_voltage_data <- function(file_path) {
+  # Read the data from the txt file
+  data <- read_delim(file_path, delim = "\t", 
+                     col_names = c("Differential 1 - 2 Ave. (mV)", "Differential 3 - 4 Ave. (mV)", "Differential 5 - 6 Ave. (mV)", "Differential 7 - 8 Ave. (mV)", 
+                                   "Differential 9 - 10 Ave. (mV)", "Differential 11 - 12 Ave. (mV)", "Differential 13 - 14 Ave. (mV)"))
+  # Convert to numeric with dplyr
+  data <- mutate_all(data[1:7], function(x) as.numeric(as.character(x)))
+  
+  # Generate the time column with one-second intervals
+  start_time <- as.POSIXct("2024-06-01 00:00:00")  # Define the start time
+  time_sequence <- seq(from = start_time, by = "1 sec", length.out = nrow(data))
+  
+  # Format the time column to exclude the date
+  # time_sequence_formatted <- format(time_sequence, format = "%H:%M:%S")
+  
+  # Append the formatted time column to the data frame
+  data$time <- time_sequence
+  
+  # Remove First Row 
+  data <- data[-1, ]
+  
+  # Omit Missing Values
+  data <- na.omit(data)
+  
+  # Return Data Frame 
+  return(as.data.frame(data))
+}
+
+# Simple Data Transformations: 
+# Data Frame: 
+df <- read_voltage_data(file_path)
+# Reorder columns with time as the first column
+df <- df %>% select(time, everything())
+```
+
+```{r}
+# Split Data Frames By Channel: 
+sub_dataframes <- lapply(names(df)[-1], function(col_name) {
+  sub_df <- df[, c("time", col_name), drop = FALSE]
+  # sub_df$time <- as.POSIXct(sub_df$time, format="%H:%M:%S")
+  return(sub_df)
+})
+
+# assign names from original data frame to generate sub dfs: 
+names(sub_dataframes) <- names(df)[-1]
+```
+
+```{r}
+#| echo: false
+print(head(df))
+```
+
+A summary of this data indicates the differences in values between each channel, and this is useful in the following selection process of a subset of channels to be analyzed for spiking activity.
+
+```{r}
+#| echo: false
+summary(df)
+```
+
+# Models & Visualization
+
+Visualization played a crucial role in this project because they clearly show the physical process that is occurring in the mycelial network. Patterns were more easily recognized through a visual representation of the data and this proved to be really helpful for identifying patterns and designing the algorithms to extract spikes.
+
+### Fungal Spike Recordings:
+
+These plots show the duration of the channels for the entire 5 days of recording:
+
+```{r}
+#| echo: false
+# Test Plot
+ts_plot(as.data.frame(sub_dataframes[1]), title = "Channel 1 Voltages", color = "blue")
+ts_plot(as.data.frame(sub_dataframes[2]), title = "Channel 2 Voltages", color = "red")
+ts_plot(as.data.frame(sub_dataframes[3]), title = "Channel 3 Voltages", color = "green")
+# ts_plot(as.data.frame(sub_dataframes[4]), title = "Channel 4 Voltages", color = "purple")
+# ts_plot(as.data.frame(sub_dataframes[5]), title = "Channel 5 Voltages", color = "yellow") 
+# ts_plot(as.data.frame(sub_dataframes[6]), title = "Channel 6 Voltages", color = "orange")
+# ts_plot(as.data.frame(sub_dataframes[7]), title = "Channel 7 Voltages", color = "violet")
+```
+
+```{r}
+# Melt the dataframe to long format for ggplot and to avoid binning errors 
+df_melt <- melt(df, id.vars = 'time', variable.name = 'Differential', value.name = 'Voltage')
+```
+
+### Plot Histogram for each Differential:
+
+```{r}
+#| echo: false
+ggplot(df_melt, aes(x = Voltage)) +
+  geom_histogram(binwidth = 0.01, fill = "black", alpha = 0.7) +
+  facet_wrap(~ Differential, scales = "free_x") +
+  labs(title = "Distribution of Voltage Differences", x = "Voltage (mV)", y = "Frequency") +
+  theme_minimal()
+```
+
+### Plot Density Plots for Each Differential:
+
+```{r}
+#| echo: false
+ggplot(df_melt, aes(x = Voltage, fill = Differential)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~ Differential, scales = "free_x") +
+  labs(title = "Density Plot of Voltage Differences", x = "Voltage (mV)", y = "Density") +
+  theme_minimal()
+```
+
+### Correlation Plot:
+
+```{r}
+#| echo: false
+# Remove Time for correlation test: 
+numeric_df <- df[, sapply(df, is.numeric)]
+
+# Calculate correlation matrix
+cor_matrix <- cor(numeric_df)
+
+print(cor_matrix)
+# Visualize the correlation matrix using a correlation plot 
+corrplot::corrplot((cor(cor_matrix)))
+```
+
+```{r}
+# Calculate mean and standard deviation for each column
+means <- sapply(df, mean, na.rm = TRUE)
+sds <- sapply(df, sd, na.rm = TRUE)
+
+# Combine into a single data frame
+summary_df <- data.frame(Column = names(df), Mean = means, Standard_Deviation = sds)
+
+# Print the summary data frame
+print(summary_df)
+```
+
+## Channel Sub-selection:
+
+According to the previous visualizations and descriptive statistics of each channel, channels 1-3 are selected for analysis. The criteria for this selection was based on high similarity, because the ultimate goal is to provide a functional Kmeans clustering algorithm. Due to the low frequency of spikes in mycelial data, I wanted to maximize the potential for creating a function clustering algorithm of the data.
+
+```{r}
+# Channel 1: 
+channel_1 = as.data.frame(sub_dataframes[1]) 
+colnames(channel_1) <- c('time', 'voltage avg.') 
+channel_1$`voltage avg.` <- as.numeric(channel_1$`voltage avg.`)
+```
+
+```{r}
+# Channel 2: 
+channel_2 = as.data.frame(sub_dataframes[2]) 
+colnames(channel_2) <- c('time', 'voltage avg.') 
+channel_2$`voltage avg.` <- as.numeric(channel_2$`voltage avg.`)
+```
+
+```{r}
+# Channel 3: 
+channel_3 = as.data.frame(sub_dataframes[3]) 
+colnames(channel_3) <- c('time', 'voltage avg.') 
+channel_3$`voltage avg.` <- as.numeric(channel_3$`voltage avg.`)
+```
+
+## Power Spectral Density:
+
+The implementation of Power Spectral Density is utilized to apply filtering to each channel by providing insight into the frequency content. The frequency of the signal is represented as a power distribution across frequencies, and this is then plotted. The goal is to identify the frequencies that you want to enhance by passing them, and rejecting the remaining frequencies. The spectral density of the time series data is calculated and then spikes are identified the by significant peaks in the PSD plot at specific frequencies.
+
+```{r}
+## Channel 1: 
+# Power Spectral Density Channel 1: 
+psd_1 <- spectrum(channel_1$`voltage avg.`, plot = FALSE)
+
+#Extract Frequency
+freq <- psd_1$freq
+spec <- psd_1$spec
+
+# Create a data frame for plotting
+channel_1_psd <- data.frame(Frequency = freq, SpectralDensity = spec)
+```
+
+### Channel 1 PSD:
+
+```{r}
+plot(channel_1_psd$Frequency, channel_1_psd$SpectralDensity, type = "l", col = "blue", lwd = 2,
+     xlab = "Frequency", ylab = "Spectral Density",
+     main = "Channel 1: Power Spectral Density",
+     ylim = c(0,.0025),
+     xlim = c(0, .3))
+```
+
+```{r}
+#| echo: false
+## Channel 2: 
+# Power Spectral Density Channel 2: 
+psd_2 <- spectrum(channel_2$`voltage avg.`, plot = FALSE)
+
+#Extract Frequency
+freq <- psd_2$freq
+spec <- psd_2$spec
+
+# Create a data frame for plotting
+channel_2_psd <- data.frame(Frequency = freq, SpectralDensity = spec)
+```
+
+### Channel 2 PSD:
+
+```{r}
+# Plot PSD of Channel 2: 
+plot(channel_2_psd$Frequency, channel_2_psd$SpectralDensity, type = "l", col = "red", lwd = 2,
+     xlab = "Frequency", ylab = "Spectral Density",
+     main = "Channel 2: Power Spectral Density",
+     ylim = c(0,.004),
+     xlim = c(0, .3))
+```
+
+```{r}
+#| echo: false
+## Channel 3: 
+# Power Spectral Density Channel 3: 
+psd_3 <- spectrum(channel_3$`voltage avg.`, plot = FALSE)
+
+#Extract Frequency
+freq <- psd_3$freq
+spec <- psd_3$spec
+
+# Create a data frame for plotting
+channel_3_psd <- data.frame(Frequency = freq, SpectralDensity = spec)
+```
+
+### Channel 3 PSD:
+
+```{r}
+# Plot PSD of Channel 3: 
+plot(channel_3_psd$Frequency, channel_3_psd$SpectralDensity, type = "l", col = "green", lwd = 2,
+     xlab = "Frequency", ylab = "Spectral Density",
+     main = "Channel 3: Power Spectral Density",
+     ylim = c(0,.004),
+     xlim = c(0, .3))
+```
+
+## Filtering the Data
+
+A low pass filter is used according to methods learned from neural data processing to smooth the signal. This proved to be effective at distinguishing the spikes of each channel and prepared the data for the implementation of a spike detection algorithm.
+
+```{r}
+# Channel 1 Filter
+# Lower and Upper Cutoff Frequencies based on PSD 
+lowcut <- 0.025 # Cutoff Frequency Defined based on multiple empirical estimates 
+highcut <- .15 # 
+sampling_rate <- 1 # 1 sample per second
+
+butter_low <- butter(2, W = c(lowcut, highcut)/(sampling_rate/2), type = "pass")
+filter_1 <- as.data.frame(filtfilt(butter_low, channel_1$`voltage avg.`))
+filter_1$time <- channel_1$time # Add back the time column
+
+# Reorder columns with time as the first column
+filter_1 <- filter_1 %>% select(time, everything())
+names(filter_1) <- names(channel_1) 
+```
+
+```{r}
+#| echo: false
+# Filter 2 
+# Define cutoff frequencies
+lowcut <- 0.01
+highcut <- 0.15
+filter_2 <- as.data.frame(filtfilt(butter_low, channel_2$`voltage avg.`))
+filter_2$time <- channel_2$time # Add back the time column
+
+# Reorder columns with time as the first column
+filter_2 <- filter_2 %>% select(time, everything())
+names(filter_2) <- names(channel_2) 
+
+# Channel 3 
+# Sampling rate (assumed to be 1 sample per second)
+sampling_rate <- 1
+
+# Design Butterworth bandpass filter
+butter_bandpass_3 <- butter(2, c(lowcut, highcut) / (sampling_rate / 2), type = "pass")
+filter_3 <- as.data.frame(filtfilt(butter_bandpass_3, channel_3$`voltage avg.`))
+filter_3$time <- channel_3$time
+
+filter_3 <- filter_3 %>% select(time, everything())
+names(filter_3) <- names(channel_3) 
+```
+
+### Filtered Channels:
+
+```{r}
+#| echo: false
+ts_plot(filter_1)
+ts_plot(filter_2)
+ts_plot(filter_3)
+```
+
+## Spike Detection
+
+### Local Average Threshold Model:
+
+This model for spike detection is implemented from the paper titled "Language of Fungi Derived from their Electrical Spiking Activity". It works by calculating the average value of the neighborhood for each index i, where the i is considered a peak if the absolute difference between the neighborhood average and the value i is greater than a threshold value. The following parameters to detect spikes in Ghost Fungi data are recommended: In this paper, Ghost Fungi are shown to have low amplitude and low frequency of electrical spiking activity with the variability of the characteristics highest among species recorded. The detection of spikes on this subset of channels is consistent with this result, and the number of spikes for each channel is similar to the findings in this paper that are claimed to have a 80% accuracy.
+
+```{r}
+# Parameters for Ghost Fungi
+window_size <- 50
+threshold <- 0.03
+distance <- 100
+```
+
+```{r}
+spike_detection <- function(data, window_size, threshold, distance) {
+  spikes <- c()
+  s_vector <- logical(length(data))  
+  n <- length(data)
+  
+  # Calculate local average and detect spikes
+  for (i in (2*window_size + 1):(n - 2*window_size)) {
+    neighborhood <- data[(i - 2*window_size):(i + 2*window_size)]
+    local_avg <- sum(neighborhood) / (4 * window_size)
+    
+  # Determine spike based on threshold
+    if (abs(data[i] - local_avg) > threshold) {
+      spikes <- c(spikes, i)
+      s_vector[i] <- TRUE
+    }
+  }
+  
+  return(s_vector)
+}
+
+```
+
+Once the spikes are identified, an annotated column is added at the index representing the peak.
+
+```{r}
+# Generate Annotated Spike Column
+# Filtered Channel 1 
+vector_annotation_1 <- spike_detection(filter_1$`voltage avg.`, window_size, threshold, distance)
+filter_1$spike <- vector_annotation_1 
+
+# Filtered Channel 2
+vector_annotation_2 <- spike_detection(filter_2$`voltage avg.`, window_size, threshold, distance)
+filter_2$spike <- vector_annotation_2 
+
+# Filtered Channel 3 
+vector_annotation_3 <- spike_detection(filter_3$`voltage avg.`, window_size, threshold, distance)
+filter_3$spike <- vector_annotation_3 
+
+
+# Spike Index Example
+print("Spike Index Example: ")
+which(filter_2$spike == TRUE)
+
+# Interval Detection 
+interval <- 0
+findInterval <- function(spikes) {
+  interval[1] = 0
+  for (i in 2:length(spikes)) {
+    interval[i] <- spikes[i] - spikes[i-1]
+  }
+  return(interval)
+}
+
+interval <- findInterval(filter_1$spike)
+```
+
+### Discrete Wavelet Transform:
+
+```{r}
+# Function to find the nearest power of 2 and pad the data
+nearest_power_of_2 <- function(n) {
+  return(2^floor(log2(n)))
+}
+
+X <- filter_1$`voltage avg.`
+nearest_length <- nearest_power_of_2(length(X))
+
+# Perform DWT on padded data
+trimmed_data <- X[1:nearest_length]
+
+#Discete Wave Transform 
+result <- dwt(trimmed_data, wf = "la8", n.levels = 4, boundary = "periodic")
+summary(result)
+```
+
+```{r}
+par(mfrow = c(5, 1), mar = c(2, 2, 2, 1))  # Set up the plotting area to have 5 rows and 1 column
+
+# Plot the detail coefficients at each level
+plot(result$d1, type = "l", main = "Detail Coefficients (Level 1)", xlab = "Index", ylab = "Amplitude")
+plot(result$d2, type = "l", main = "Detail Coefficients (Level 2)", xlab = "Index", ylab = "Amplitude")
+plot(result$d3, type = "l", main = "Detail Coefficients (Level 3)", xlab = "Index", ylab = "Amplitude")
+plot(result$d4, type = "l", main = "Detail Coefficients (Level 4)", xlab = "Index", ylab = "Amplitude")
+
+# Plot the approximation coefficient at the highest level
+plot(result$s4, type = "l", main = "Approximation Coefficient (Level 4)", xlab = "Index", ylab = "Amplitude")
+
+# Reset the plotting area to default
+par(mfrow = c(1, 1))
+```
+
+## Waveform Extraction Method:
+
+I implemented my own waveform extraction method based upon the spike detection algorithm. This algorithm works by extracting a symmetrical window based upon the annotated column from the spike detection model. Once the waveform is extracted from each channel, they are combined into a single dataset for clustering analysis.
+
+```{r}
+## Remove Duplicates
+filter_spikes <- function(spikes) {
+  # Filter out spikes that are too close to each other
+  filtered_spikes <- c()
+  if (length(spikes) > 0) {
+    filtered_spikes <- spikes[1]
+    for (i in 2:length(spikes)) {
+      if ((spikes[i] - filtered_spikes[length(filtered_spikes)]) > distance) {
+        filtered_spikes <- c(filtered_spikes, spikes[i])
+      }
+    }
+  }
+}
+
+# Function to extract waveforms around detected spikes
+extract_waveforms <- function(data, window_size) {
+  # Initialize an empty list to store waveforms
+  waveforms <- list()
+  
+  # Loop through the dataframe to find spike indices
+  for (i in 1:nrow(data)) {
+    if (data$spike[i]) {
+      # Define the start and end index for the waveform extraction
+      start_idx <- max(1, i - window_size)
+      end_idx <- min(nrow(data), i + window_size)
+      
+      # Extract the waveform
+      waveform <- data[start_idx:end_idx, ]
+      
+      # Add the extracted waveform to the list
+      waveforms[[length(waveforms) + 1]] <- waveform
+    }
+  }
+  
+  return(waveforms)
+}
+
+
+# Waveform Extraction Example: 
+window_size <- 10 # Number of samples before and after the spike
+wf_1 <- extract_waveforms(filter_1, window_size)
+wf_2 <- extract_waveforms(filter_2, window_size)
+wf_3 <- extract_waveforms(filter_3, window_size)
+
+combined_list <- c(wf_1, wf_2, wf_2)
+```
+
+### Extracted Waveform Examples:
+
+You may notice some similarities between the spikes presented in channel 2 and channel 3. In particular, it is interesting that they are inverse representations of the same spiking character. This inverse behavior is confirmed by a high negative correlation = -0.8462070 that is obtained from the sub-selection correlation matrix between these two channels.
+
+```{r}
+#| echo: false
+
+# Channel 1: 
+ts_plot(as.data.frame(wf_1[[1]]))
+
+# Channel 2: 
+ts_plot(as.data.frame(wf_2[[1]]))
+ts_plot(as.data.frame(wf_2[[50]]))
+
+# Channel 3: 
+ts_plot(as.data.frame(wf_3[[1]]))
+ts_plot(as.data.frame(wf_3[[50]]))
+```
+
+```{r}
+# Utility Function to handle combined detected waveforms from each channel 
+wf_handler <- function(wf) {
+# Assuming waveforms 
+extracted_values <- list()
+# Iterate through the list and extract the 'value' column
+for (i in 1:length(wf)) {
+  # Extract the 'value' column and name it as 'value_i' where i is the index
+  values <- wf[[i]]$`voltage avg.`
+  extracted_values[[i]] <- values
+}
+#combine values 
+combined_values <- do.call(cbind, extracted_values)
+# Convert the combined values to a data frame and set column names
+combined_values_df <- as.data.frame(combined_values)
+colnames(combined_values_df) <- paste0("value_", 1:length(wf))
+
+# Print the combined data frame
+return(as.data.frame(combined_values_df)) 
+}
+
+# Compute Final Waveform Dataframe For Feature Extraction
+wf_final <- wf_handler(combined_list)
+```
+
+## Dimensionality Reduction & K-Means Clustering:
+
+K-Means is used in spike sorting by grouping similar spikes together, effectively sorting them into different clusters. Each cluster represents a different type of spike, which could correspond to different components of communication in the mycelial network. This model identifies patterns, spike shapes, amplitudes and other characteristics. PCA reduces the dimensionality of the data, and helps identify key features known as principal components that capture variance in the data. This is also also very helpful for the identification of spikes.
+
+```{r}
+# Normalize the Data
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+normalized_df <- as.data.frame(lapply(wf_final, normalize))
+
+# Determine the Number of Clusters:
+# Elbow Method 
+wss <- (nrow(normalized_df)-1)*sum(apply(normalized_df, 2, var))
+for (i in 2:15) wss[i] <- sum(kmeans(normalized_df, centers=i)$withinss)
+```
+
+```{r}
+# plot Chart
+plot(1:15, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares")
+# Using fviz_nbclust
+fviz_nbclust(normalized_df, kmeans, method = "wss")
+```
+
+```{r}
+# Perform K-Means Clustering
+set.seed(123)
+k <- 4  # 4 Clusters according to plot 
+kmeans_result <- kmeans(normalized_df, centers=k)
+
+# Add Cluster Information to the Dataframe
+wf_final$cluster <- as.factor(kmeans_result$cluster)
+
+# Cluster Visualization: 
+ggplot(wf_final, aes(x = value_1, y = value_2, color = cluster)) + 
+  geom_point() +
+  labs(title = "K-Means Clustering", x = "Feature 1", y = "Feature 2")
+```
+
+```{r}
+# PCA Dimension Reduction for visualization 
+pca_result <- prcomp(normalized_df, scale. = TRUE)
+pca_df <- data.frame(pca_result$x[,1:2], cluster = wf_final$cluster)
+
+# PCA Visualization
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cluster)) + 
+  geom_point() + 
+  labs(title = "K-Means Clustering with PCA", x = "Principal Component 1", y = "Principal Component 2")
+
+```
+
+# Analysis and Discussion
+
+The final aim of this project was to identify some of the underlying structure of the spikes observed in the data obtained from the mycelium network of Ghost Fungi. The structure of this project may be summarized as a pre-processing of the raw data, followed by spike detection, then feature extraction and clustering. This is a standard process in neural data processing, but is novel in the analysis of mycelium. The conclusion of this process is indicated by the PCA dimension reduction visualization of the key features of each spike. There is clearly some clustering occurring based on the features identified by K-means. However, it is arguable that the data in the reduced dimensions conveys no clear separation between different classes or groups. The ideal aim of PCA is to retain as much variance as possible. But, low separation could mean that the directions of maximum variance do not correspond to the direction that separate the different identified spikes. Further analysis is needed to extract the characteristics of these identified waveforms and their features. 
+
+A continued fine tuning of this general approach may be considered as well to increase the accuracy and efficiency of the overall process. For example, selecting more de-correlated channels to improve the performance of K-means should have been considered more carefully during the sub-selection process. K-means is not inherently well-suited for correlated data due to its reliance on Euclidean distance, such that PCA and K-means were used together to improve the results by de-correlating the data. The difficulty and scope of this analysis really limited my ability to explore the data with more clustering models. PCA + K-Means modeling is a standard implementation for this type of signal processing, but it would have been ideal to implement a Gaussian Mixture Model for testing an alternative clustering method that works well with correlated data and could augment the results from PCA and K-Means. 
+
+The spike detection algorithm in this project is the only model that is specifically designed for the analysis of mycelial data. Fine tuning the other parts of this project to obtain more insights into the behavior of mushroom signals would conceivably improve accuracy overall. The current methodologies are heavily influenced by neural signal processing, because this is where the majority of work has been accomplished. Feature Engineering was done mostly automatically by functions used from libraries to perform K-means. A more detailed analysis of the features of these signals would generate results that are specific to the behavior of this kind of data, and improve the accuracy of spike sorting. Also, The curse of dimensionality is a common problem in neural data processing and motivated the use of PCA to help improve results. 
+
+The main takeaway I gained from this project is to restrict the scope and aim of my research to achieve greater precision with perhaps a more limited range of results. I put a ton of work into completing this entire project, but still at the potential expense of accuracy. In the future I would limit my analysis to a smaller area of mycelial signal processing, and optimize a more concentrated focus. I have been very inspired by the work of Andrew Adamatzky, and I have wanted to follow in his footsteps with my own version of his "Fungal Minds" papers for quite some time. In that way, I am very happy to have had to opportunity and motivation to complete this project. 
+
+# Impact
+The potential impact of fungal computing seems extensive. Mushrooms possess quite a bit of cultural significance in human society and have been incorporated into medicine and pharmaceuticals for thousands of years. Furthermore, it is well known that mushrooms are important in the ecological well-being of forests, and maintain nutrient supplies between different types of vegetation. The recent discovery of the complexity of mushrooms and their compatibility with advances in information processing make fungal computing an exciting new field. It seems to be in the best interest of the scientific community to study mushrooms from a computational perspective, and make sense of these still mysterious forms of vegetation. It is conceivable that advances in fungal computing may lead to important advances in an understanding of their ecology and pharmacology. This is based just on our limited understanding of the fungal kingdom, which already establishes mushrooms as essential benefactors of nature and a potential source for groundbreaking medicine, like penicillin. Fungal computing may lead to potential biotechnological applications that will benefit human society and the Earth. 
+
+### References
+
+1.  Fungal Machines by Andrew Adamatzsky
+2.  ChatGPT-4
+3.  Neural Data Science Lectures - https://www.youtube.com/playlist?list=PL05umP7R6ij3SxudmSWFL_zGh0BMrRdrx
+4.  Recordings of electrical activity of four species of fungi - https://zenodo.org/records/5790768
